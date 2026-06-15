@@ -3,8 +3,8 @@
 	<Name value="Dizor_UnlockOpenDoors" />
 	<DisplayName value="UnlockOpenDoors" />
 	<Description value="Unlocks annoying locked open doors." />
-	<Author value="Dizor" />
+	<Author value="Dizor; V3 port by icehot666" />
 	<Website value="https://github.com/IDizor/7D2D-UnlockOpenDoors" />
-	<Version value="1.8" compat="1.0"/>
+	<Version value="2.0" compat="1.0"/>
 </xml>
 
