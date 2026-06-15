@@ -1,111 +1,131 @@
-﻿using System;
-using System.Reflection;
 using HarmonyLib;
-using UniLinq;
+using System;
+using System.Reflection;
 using UnityEngine;
+using static TileEntity;
 
 /// <summary>
-/// Makes locked open doors unlocked.
+/// Makes locked-open POI doors, hatches, and gates usable.
+/// Updated for the 7 Days to Die V3 composite tile-entity/feature system.
 /// </summary>
 public class UnlockOpenDoors : IModApi
 {
     /// <summary>
     /// Mod initialization.
     /// </summary>
-    /// <param name="_modInstance"></param>
     public void InitMod(Mod _modInstance)
     {
-        Debug.Log("Loading mod: " + GetType().ToString());
-        var harmony = new Harmony(GetType().ToString());
-        harmony.PatchAll(Assembly.GetExecutingAssembly());
+        Debug.Log("Loading mod: " + GetType());
+
+        new Harmony(GetType().FullName)
+            .PatchAll(Assembly.GetExecutingAssembly());
     }
 
     /// <summary>
-    /// Makes locked open doors/hatches/gates unlocked.
+    /// Returns true when this lock belongs to an unowned door that is open.
     /// </summary>
-    [HarmonyPatch(typeof(TileEntitySecure))]
-    [HarmonyPatch(nameof(TileEntitySecure.SetLocked))]
-    public static class TileEntitySecure_SetLocked
+    private static bool IsOpenUnownedDoor(
+        TEFeatureLockable lockable)
     {
-        public static void Prefix(TileEntitySecure __instance, ref bool _isLocked)
+        if (lockable == null ||
+            lockable.Parent == null ||
+            lockable.GetOwner() != null)
         {
-            if (_isLocked && __instance is TileEntitySecureDoor && __instance.GetOwner() == null && BlockDoor.IsDoorOpen(__instance.blockValue.meta))
+            return false;
+        }
+
+        TEFeatureDoor door =
+            lockable.Parent.GetFeature<TEFeatureDoor>();
+
+        return door != null && door.IsOpen();
+    }
+
+    /// <summary>
+    /// Unlocks a composite door when it is open, locked,
+    /// and not player-owned.
+    /// </summary>
+    private static void UnlockOpenUnownedDoor(
+        TileEntityComposite tileEntity)
+    {
+        if (tileEntity == null)
+        {
+            return;
+        }
+
+        TEFeatureDoor door =
+            tileEntity.GetFeature<TEFeatureDoor>();
+
+        TEFeatureLockable lockable =
+            tileEntity.GetFeature<TEFeatureLockable>();
+
+        if (door != null &&
+            lockable != null &&
+            door.IsOpen() &&
+            lockable.IsLocked() &&
+            lockable.GetOwner() == null)
+        {
+            lockable.SetLocked(false);
+        }
+    }
+
+    /// <summary>
+    /// Prevents an unowned open door from being locked.
+    /// </summary>
+    [HarmonyPatch(
+        typeof(TEFeatureLockable),
+        nameof(TEFeatureLockable.SetLocked))]
+    public static class TEFeatureLockable_SetLocked
+    {
+        public static void Prefix(
+            TEFeatureLockable __instance,
+            ref bool __0)
+        {
+            if (__0 && IsOpenUnownedDoor(__instance))
             {
-                //Debug.LogError($"(SetLocked) Annoying door: {__instance.blockValue.Block?.GetBlockName()}, Position: {ToCompasPos(__instance.ToWorldPos())}");
-                _isLocked = false;
+                __0 = false;
             }
         }
     }
 
     /// <summary>
-    /// Makes locked open doors/hatches/gates unlocked (for already discovered doors).
+    /// Unlocks an unowned POI door immediately after
+    /// the game opens it.
     /// </summary>
-    [HarmonyPatch(typeof(TileEntity))]
-    [HarmonyPatch(nameof(TileEntity.OnReadComplete))]
-    public static class TileEntity_OnReadComplete
+    [HarmonyPatch(
+        typeof(TEFeatureDoor),
+        nameof(TEFeatureDoor.SetOpen))]
+    public static class TEFeatureDoor_SetOpen
     {
-        public static void Postfix(TileEntity __instance)
+        public static void Postfix(
+            TEFeatureDoor __instance)
         {
-            if (__instance is TileEntitySecureDoor door && door.IsLocked())
+            if (__instance != null &&
+                __instance.Parent != null)
             {
-                if (BlockDoor.IsDoorOpen(door.blockValue.meta) && door.GetOwner() == null)
-                {
-                    //Debug.LogErrorFormat($"(OnReadComplete) Annoying door: {door.blockValue.Block?.GetBlockName()}, Position: {ToCompasPos(door.ToWorldPos())}");
-                    door.SetLocked(false);
-                }
+                UnlockOpenUnownedDoor(__instance.Parent);
             }
         }
     }
 
     /// <summary>
-    /// Unlocks door/hatch/gates opened by a key or switch.
+    /// Repairs open-and-locked doors loaded from save
+    /// or prefab data.
     /// </summary>
-    [HarmonyPatch(typeof(BlockDoorSecure))]
-    [HarmonyPatch(nameof(BlockDoorSecure.OnTriggered))]
-    public static class BlockDoorSecure_OnTriggered
-    {
-        public static void Postfix(WorldBase _world, int _cIdx, Vector3i _blockPos, BlockValue _blockValue)
+    [HarmonyPatch(
+        typeof(TileEntityComposite),
+        "read",
+        new Type[]
         {
-            if (BlockDoor.IsDoorOpen(_blockValue.meta))
-            {
-                var door = _world.GetTileEntity(_cIdx, _blockPos) as TileEntitySecureDoor;
-                if (door != null && door.IsLocked() && door.GetOwner() == null)
-                {
-                    door.SetLocked(false);
-                }
-            }
-        }
-    }
-
-    /// <summary>
-    /// Restores the initial locked state for closed doors during TileEntity/POI reset.
-    /// </summary>
-    [HarmonyPatch(typeof(TileEntityLootContainer))]
-    [HarmonyPatch(nameof(TileEntityLootContainer.Reset))]
-    public static class TileEntityLootContainer_Reset
+            typeof(PooledBinaryReader),
+            typeof(StreamModeRead),
+            typeof(int[])
+        })]
+    public static class TileEntityComposite_Read
     {
-        public static void Postfix(TileEntityLootContainer __instance)
+        public static void Postfix(
+            TileEntityComposite __instance)
         {
-            if (__instance is TileEntitySecureDoor door && door.GetOwner() == null && !BlockDoor.IsDoorOpen(door.blockValue.meta))
-            {
-                door.SetLocked((door.blockValue.meta & 4) > 0);
-            }
+            UnlockOpenUnownedDoor(__instance);
         }
-    }
-
-    private static string ToCompasPos(Vector3i p)
-    {
-        return (Math.Abs(p.x).ToString() + (p.x > 0 ? "E" : "W")) + ", " + (Math.Abs(p.z).ToString() + (p.z > 0 ? "N" : "S")) + ", " + p.y.ToString() + "h";
-    }
-
-    private static string GetCallStackPath(int limit = 5)
-    {
-        var stackTrace = new System.Diagnostics.StackTrace();
-        var path = string.Join(" <-- ", stackTrace.GetFrames()
-            .Skip(3)
-            .Take(limit)
-            .Select(f => f.GetMethod())
-            .Select(m => m.DeclaringType.Name + "." + m.Name + "()"));
-        return path;
     }
 }
