@@ -2,9 +2,9 @@
 <xml>
 	<Name value="Dizor_UnlockOpenDoors" />
 	<DisplayName value="UnlockOpenDoors" />
-	<Description value="Unlocks annoying locked open doors." />
+	<Description value="Unlocks locked-open POI doors. Updated for 7 Days to Die V3." />
 	<Author value="Dizor; V3 port by icehot666" />
-	<Website value="https://github.com/IDizor/7D2D-UnlockOpenDoors" />
+	<Website value="https://github.com/icehot666/7D2D-UnlockOpenDoors" />
 	<Version value="2.0" compat="1.0"/>
 </xml>
 
