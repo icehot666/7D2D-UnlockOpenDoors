@@ -1,7 +1,7 @@
-UnlockOpenDoors - 7 Days to Die V3.4 EXP compatibility candidate
-===============================================================
+UnlockOpenDoors - 7 Days to Die V3.4 EXP compatibility
+======================================================
 
-Status: Source-only test build. NOT compiled or tested against V3.4 game DLLs.
+Status: Tested in v3.4.0 EXP release only.
 Based on the previously working V3.0 C# implementation.
 
 What changed
