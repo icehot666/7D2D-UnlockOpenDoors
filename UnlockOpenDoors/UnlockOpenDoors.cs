@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using HarmonyLib;
@@ -7,9 +8,9 @@ using UnityEngine;
 /// <summary>
 /// Makes locked-open, unowned POI doors usable in 7 Days to Die V3.x.
 ///
-/// V3.4 compatibility candidate: resolves patch targets at runtime, so a change
-/// to one game method's signature cannot prevent the other hooks from loading.
-/// The game DLL and in-game behaviour still need to be validated on V3.4.
+/// Resolves patch targets at runtime for V3.x compatibility.
+/// Loaded doors are repaired on the game update loop, not while the game
+/// is deserialising tile entities (when SetLocked can throw in SetModified).
 /// </summary>
 public class UnlockOpenDoors : IModApi
 {
@@ -41,6 +42,39 @@ public class UnlockOpenDoors : IModApi
 
     private static int runtimeErrorCount;
     private static int unlockedDoorCount;
+
+    // Reads happen before some tile entities are connected to a live world/chunk.
+    // Never call SetLocked in a TileEntityComposite.read postfix: doing so
+    // invokes TileEntity.setModified and can throw a NullReferenceException.
+    private const int MaxQueuedRepairs = 4096;
+    private const int RepairsPerUpdate = 16;
+    private const int MaxDeferredAttempts = 30;
+    private static readonly object RepairSync = new object();
+    private static readonly Queue<DeferredRepair> PendingRepairs =
+        new Queue<DeferredRepair>();
+    private static readonly HashSet<object> PendingEntities =
+        new HashSet<object>(new ReferenceComparer());
+    private static bool warnedQueueFull;
+
+    private sealed class DeferredRepair
+    {
+        internal object Composite;
+        internal DateTime NextTryUtc;
+        internal int Attempts;
+    }
+
+    private sealed class ReferenceComparer : IEqualityComparer<object>
+    {
+        public new bool Equals(object x, object y)
+        {
+            return ReferenceEquals(x, y);
+        }
+
+        public int GetHashCode(object obj)
+        {
+            return System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(obj);
+        }
+    }
 
     public void InitMod(Mod _modInstance)
     {
@@ -75,12 +109,29 @@ public class UnlockOpenDoors : IModApi
                 null, true);
             int openHooks = PatchNamed(harmony, doorType, "SetOpen", null,
                 openPostfix, false);
-            int readHooks = PatchNamed(harmony, compositeType, "read", null,
-                readPostfix, false);
+
+            // Prefer Unity's GameManager update callback for main-thread repairs.
+            // The read hook is ONLY installed when a deferred drain hook exists.
+            Type gameManagerType = AccessTools.TypeByName("GameManager");
+            MethodInfo updatePostfix = typeof(UnlockOpenDoors).GetMethod(
+                "GameUpdatePostfix", StaticFlags);
+            int updateHooks = gameManagerType == null ? 0 :
+                PatchNamed(harmony, gameManagerType, "Update", null,
+                    updatePostfix, false);
+            if (updateHooks == 0 && gameManagerType != null)
+                updateHooks = PatchNamed(harmony, gameManagerType, "UpdateTick",
+                    null, updatePostfix, false);
+            int readHooks = updateHooks > 0 ?
+                PatchNamed(harmony, compositeType, "read", null,
+                    readPostfix, false) : 0;
 
             Debug.Log(Tag + "Installed hooks: SetLocked=" + lockHooks +
                 ", SetOpen=" + openHooks + ", composite read=" + readHooks +
-                ". A nonzero count for each is expected on V3.0.");
+                ", deferred update=" + updateHooks + ".");
+
+            if (updateHooks == 0)
+                Debug.LogWarning(Tag + "No GameManager update hook available; " +
+                    "save/prefab read repairs disabled to avoid premature SetModified.");
 
             if (lockHooks == 0 || openHooks == 0 || readHooks == 0)
             {
@@ -307,10 +358,95 @@ public class UnlockOpenDoors : IModApi
         catch (Exception ex) { LogRuntimeError("SetOpenPostfix", ex); }
     }
 
+    // Read postfix must be side-effect-free: the entity may not have a world yet.
     private static void CompositeReadPostfix(object __instance)
     {
-        try { UnlockOpenUnownedDoor(__instance); }
+        try
+        {
+            if (__instance == null) return;
+            object door = GetFeature(__instance, true);
+            object lockable = GetFeature(__instance, false);
+            if (door == null || lockable == null ||
+                !ReadBool(door, isOpenMethod, isOpenProperty) ||
+                !ReadBool(lockable, isLockedMethod, isLockedProperty) ||
+                !IsUnowned(lockable))
+                return;
+
+            lock (RepairSync)
+            {
+                if (PendingEntities.Contains(__instance)) return;
+                if (PendingRepairs.Count >= MaxQueuedRepairs)
+                {
+                    if (!warnedQueueFull)
+                    {
+                        warnedQueueFull = true;
+                        Debug.LogWarning(Tag + "Deferred repair queue full; " +
+                            "additional loaded doors will not be queued.");
+                    }
+                    return;
+                }
+
+                PendingEntities.Add(__instance);
+                PendingRepairs.Enqueue(new DeferredRepair
+                {
+                    Composite = __instance,
+                    NextTryUtc = DateTime.UtcNow.AddSeconds(5)
+                });
+            }
+        }
         catch (Exception ex) { LogRuntimeError("CompositeReadPostfix", ex); }
+    }
+
+    // Run after deserialisation, on the game's main thread. Recheck door and
+    // ownership before changing any state; doors may have changed while queued.
+    private static void GameUpdatePostfix()
+    {
+        for (int i = 0; i < RepairsPerUpdate; i++)
+        {
+            DeferredRepair pending;
+            lock (RepairSync)
+            {
+                if (PendingRepairs.Count == 0) return;
+                if (PendingRepairs.Peek().NextTryUtc > DateTime.UtcNow) return;
+                pending = PendingRepairs.Dequeue();
+            }
+
+            bool retry = false;
+            try
+            {
+                UnlockOpenUnownedDoor(pending.Composite);
+            }
+            catch (Exception ex)
+            {
+                // A chunk may still be attaching to the world. Only retry the
+                // known SetModified null-reference case, not unrelated errors.
+                Exception inner = ex is TargetInvocationException &&
+                    ex.InnerException != null ? ex.InnerException : ex;
+                bool notAttached = inner is NullReferenceException &&
+                    inner.StackTrace != null &&
+                    inner.StackTrace.IndexOf("TileEntity.setModified",
+                        StringComparison.OrdinalIgnoreCase) >= 0;
+
+                if (notAttached && pending.Attempts + 1 < MaxDeferredAttempts)
+                {
+                    pending.Attempts++;
+                    pending.NextTryUtc = DateTime.UtcNow.AddSeconds(5);
+                    retry = true;
+                }
+                else
+                {
+                    LogRuntimeError("DeferredRepair", ex);
+                }
+            }
+
+            lock (RepairSync)
+            {
+                if (retry)
+                    PendingRepairs.Enqueue(pending);
+                else
+                    PendingEntities.Remove(pending.Composite);
+            }
+        }
     }
 
     // Avoid filling the console every frame if a future patch breaks an accessor.
