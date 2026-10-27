@@ -5,5 +5,5 @@
 	<Description value="Unlocks locked-open POI doors. Updated for 7 Days to Die V3.4.0." />
 	<Author value="Dizor; V3.4.0 port by icehot666" />
 	<Website value="https://github.com/icehot666/7D2D-UnlockOpenDoors" />
-	<Version value="2.0.1" compat="1.0"/>
+	<Version value="2.0.2" compat="1.0"/>
 </xml>
